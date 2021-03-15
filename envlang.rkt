@@ -298,17 +298,22 @@ location of expr    current-continuation
 
 #;(
  ;; Using first-class environments and lazy evaluations:
- ;; λ, env, χ, get, push, drop are keywords
+ ;; λ, env, get, push, drop are keywords
  ;; v-env
- v ::= (\ env χ e) ;; open term, expects an env to close the term
-    || […]         ;; mapping from names to values
+ v ::= (\ env e) ;; open term, expects an env to close the term
+    || […]       ;; env mapping from names to values
     || "str"
     || 0
-    || get
-    || push
-    || pop
+    || get       ;; env → key         → value
+    || push      ;; env → key → value → env
+    || drop      ;; env → key         → env
+    || car
+    || cdr
+    || (list v ...)
  e ::= v
-    || (@ e e e)
+    || (@ e e)
+    || env
+    || (list e ...)
 
 
 TODO: instead of ad-hoc var-to-string conversion, use a functional env
@@ -318,34 +323,32 @@ TODO: instead of ad-hoc var-to-string conversion, use a functional env
  =>            environment′                  redex′                                               continuation frames′
 
 ;; Primitive application
- APP           env=E,    χ=X                 (@ (\ env χ e) v-env (\ env () e-arg))               …
- =>            env=v-env,χ=(\ env () e-arg)              e                                        …
+ APP           [E]                           (@ (\ env e) [E′])                                   …
+ =>            [E′]                          e                                                    …
 ;;---------------------------------------------------------------------------------------------------------------------------
-;; Evaluation of sub-parts of an application
- APP-F         env=E,    χ=X                 (@  e-f e-env e-arg)                                 …
- =>            env=E,    χ=X                     e-f                                              … [env=E,χ=X],(@ _   e-env e-arg)
+;; Evaluation of sub-parts of a primitive application
+ APP-F         [E]                           (@ e-f e-env)                                        …
+ =>            [E]                              e-f                                               … [E],(@ _   e-env)
 
- APP-ENV       env=E,    χ=X                 (@ e-f e-env e-arg)                                  …
- =>            env=E,    χ=X                        e-env                                         … [env=E,χ=X],(@ v-f _     e-arg)
-
- APP-ARG       env=E,    χ=X                 (@ e-f e-env e-arg)                                  …
- =>            env=E,    χ=X                              e-arg                                   … [env=E,χ=X],(@ v-f v-env _    )
+ APP-ENV       [E]                           (@ e-f e-env)                                        …
+ =>            [E]                                  e-env                                         … [E],(@ v-f _    )
 ;;---------------------------------------------------------------------------------------------------------------------------
-;; Syntactic sugar (insertion of #%app)
- SUGAR-APP     env=E,    χ=X                 (#%app                    e-f             e-arg )    …
- =>            env=E′,   χ=X                 (@ (@ (get env "#%app")
-                                                   env
-                                                   (\ env () e-f))
-                                                env
-                                                (\ env () e-arg))  …
-;; defaults to:
- =>            env=E′,   χ=X                 (@     e-f env (\ env () e-arg))                     …
+;; Syntactic sugar (insertion of #%app for all parentheses that don't start with @)
+ SUGAR-APP     [E]                           (  e-f               e-arg ... )                     …
+ =>            [E]                           (@ (@ (@ (@ get env) "#%app")                        …
+                                                   (@ (@ (@ push env) "χ")
+                                                      (list (\ env e-f) (\ env e-arg) ...))))
+;; where the default definition of #%app makes this reduce to:
+ =>            env=E′,   χ=X                 (@ e-f env (list (\ env e-arg) ...))                 …
 
- SUGAR-LAM     env=E,    χ=X                 (λ var-name e)                                       …
- =>            env=E′,   χ=X                 (#%app (#%app λ var-name) e)                         …
-;; defaults to:
+;; in particular, SUGAR-APP for lambda-expressions gives
+ SUGAR-APP     env=E,    χ=X                 (λ var-name e)                                       …
+ =>            env=E′,   χ=X                 (@ (@ (@ get env) "#%app")
+                                                (@ (@ (@ push env) "χ")
+                                                   (list (\ env λ) (\ env var-name) (\ env e))))  …
+;; where the default definition of λ reduces to:
  =>            env=E′,   χ=X                 (@ capture
-                                                env
+                                                (push env)
                                                 (λ env χ (@ (λ env χ e)
                                                             (add env "var-name" χ)
                                                             χ)))
