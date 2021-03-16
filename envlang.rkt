@@ -1,4 +1,177 @@
 #lang racket
+(define-syntax-rule (matches? pat ...) (match-lambda [pat #t] ... [else #f]))
+(define ((procedure/arity? a) p) (and (procedure? p) (procedure-arity-includes? p a)))
+(define v?       (matches? `(\\ env χ ,_) (? hash?) (? string?) (? number?) `(ffi ,(? (procedure/arity? 3)))))
+(define e-not-v? (matches? `(@ ,e-f ,e-env ,e-arg) `(thunk ,e) 'env 'χ (? symbol?)))
+
+(define (eval debug? env+χ+redex+k-frames)
+  (when debug? (println (third env+χ+redex+k-frames)))
+  (define (r debug env+χ+redex+k-frames) (when debug? (displayln debug)) (eval debug? env+χ+redex+k-frames))
+  (match env+χ+redex+k-frames
+    [`{,E ,X ,(? v? v) ()}
+     v]
+    ;; Primitive application
+    [           `{,E     ,X                (@ (\\ env χ ,e) ,(? v? v-env) (\\ env χ ,e-arg))                                      ,… }
+     (r "APP"   `{,v-env (\\ env χ ,e-arg)              ,e                                                                        ,… })]
+    [           `{,E     ,X                (@ (ffi ,f)      ,(? v? v-env) (\\ env χ ,e-arg))                                      ,… }
+     (r "FFI"   `{,E     ,X                ,(f r v-env `(\\ env χ ,e-arg))                                                        ,… })]
+    ;;---------------------------------------------------------------------------------------------------------------------------
+    ;; Evaluation of sub-parts of an application    
+    [           `{,E     ,X                (@  ,(? e-not-v? e-f)              ,e-env ,e-arg)                                      ,… }
+     (r "@-F"   `{,E     ,X                                ,e-f                               ((,E  ,X  (@ _    ,e-env ,e-arg)) . ,…)})]
+    [           `{,E     ,X                (@  ,(? v? v-f)       ,(? e-not-v? e-env) ,e-arg)                                      ,… }
+     (r "@-ENV" `{,E     ,X                                                  ,e-env           ((,E  ,X  (@ ,v-f _      ,e-arg)) . ,…)})]
+    [           `{,E     ,X                (@  ,(? v? v-f) ,(? v? v-env) ,(? e-not-v? e-arg))                                     ,… }
+     (r "@-ARG" `{,E     ,X                                                          ,e-arg   ((,E  ,X  (@ ,v-f ,v-env _     )) . ,…)})]
+    
+    [           `{,E     ,X                   ,(? v? v-f)                                     ((,E′ ,X′ (@ _ ,e-env ,e-arg))    . ,…)}
+     (r "K-F"   `{,E′    ,X′                     (@ ,v-f ,e-env ,e-arg)                                                           ,… })]
+    [           `{,E     ,X                        ,(? v? v-env)                              ((,E′ ,X′ (@ ,v-f _   ,e-arg))    . ,…)}
+     (r "K-ENV" `{,E′    ,X′                     (@ ,v-f ,v-env ,e-arg)                                                           ,… })]
+    [           `{,E     ,X                               ,(? v? v-arg)                       ((,E′ ,X′ (@ ,v-f ,v-env _  ))    . ,…)}
+     (r "K-ARG" `{,E′    ,X′                     (@ ,v-f ,v-env ,v-arg)                                                           ,… })]
+    ;;---------------------------------------------------------------------------------------------------------------------------
+    ;; Syntactic sugar
+    ;; insertion of #%app at the front of all parentheses that don't start with an @ or \ or ffi or thunk or #%app
+    [           `{,E     ,X                (,(and (not '@ '\\ 'ffi 'thunk '#%app) e-f) ,e-arg)                                    ,… }
+     (r "#%app" `{,E     ,X                (#%app                         ,e-f  ,e-arg)                                           ,… })]
+    [           `{,E     ,X                (#%app                         ,e-f  ,e-arg)                                           ,… }
+     (r "@%app" `{,E     ,X                (@ (@ (@ #%get env (\\ env χ "#%app"))
+                                                 env (\\ env χ ,e-f))
+                                              env (\\ env χ ,e-arg))                                                              ,… })]
+    [           `{,E     ,X                (λ ,var-name ,e)                                                                       ,… }
+     (r "LAM"   `{,E     ,X                (#%app (#%app λ ,var-name) ,e)                                                         ,… })]
+    [           `{,E     ,X                (thunk ,e)                                                                             ,… }
+     (r "THUNK" `{,E     ,X                (\\ env χ (@ (\\ env χ ,e) env ,X))                                                    ,… })]
+    ;;---------------------------------------------------------------------------------------------------------------------------
+    ;; Built-ins and variables
+    [           `{,E     ,X                env                                                                                    ,… }
+     (r "VAR"   `{,E     ,X                ,E                                                                                     ,… })]
+    [           `{,E     ,X                χ                                                                                      ,… }
+     (r "VAR"   `{,E     ,X                ,X                                                                                     ,… })]
+    [           `{,E     ,X                #%get                                                                                  ,… }
+     (r "VAR"   `{,E     ,X                ,(car (hash-ref E "#%get"))                                                            ,… })]
+    [           `{,E     ,X                ,(? symbol? var-name)                                                                  ,… }
+     (r "VAR"   `{,E     ,X                (@ #%get env (\\ env χ ,(symbol->string var-name)))                                    ,… })]
+    ;;---------------------------------------------------------------------------------------------------------------------------
+    [other
+     `(stuck . ,other)]))
+
+(define unit '(\\ env χ χ))
+(define (#%force eval env t)                        (eval "FFI:FORCE" `{,env ,unit (@ ,t ,env ,unit) ()}))
+(define (#%get   eval env χ)                        (car (hash-ref env (#%force eval env χ))))
+(define (#%push  ev1 env1 χ) `(ffi ,(λ (ev2 env2 v) (hash-update env1 (#%force ev1 env1 χ) (λ (vs) (cons (#%force ev2 env2 v) vs)) '()))))
+(define (#%drop  eval env χ)                        (hash-update env (#%force eval env χ) (λ (vs) (cdr vs))))
+(define (-#%app  ev1 env1 f) `(ffi ,(λ (ev2 env2 a) `(@ ,(#%force ev1 env1 f) env (\\ env χ ,(#%force ev2 env2 a))))))
+(define (#%lam   ev1 env1 a) `(ffi ,(λ (ev2 env2 e)
+                                      (let ([astr (match ([`(\\ env χ (? symbol? a)) (symbol->string a)]))])
+                                        `(@ capture
+                                            env
+                                            (\ env χ (@ (\ env χ ,e)
+                                                        (@ (@ #%push env ,astr) env χ)
+                                                        χ)))))))
+(define (#%capture eval E f) `(\ env χ (@ ,f ,E χ)))
+(define-syntax-rule (ffis f ...) (make-hash (list (cons (symbol->string 'f) `((ffi ,f))) ...)))
+(define initial-env
+  (let ([#%app -#%app]) (ffis #%force #%get #%push #%drop #%app)))
+
+
+
+(define e-or-v? (or? e-not-v? v?))
+
+
+(require rackunit predicates)
+(define (ev e [debug? #f]) (eval debug? `(,initial-env (\\ env χ "argv") ,e ())))
+
+(check-pred v? '(\\ env χ 1))
+(check-pred v? '(\\ env χ (\\ env χ 1)))
+(check-pred v? #hash())
+(check-pred v? initial-env)
+(check-pred v? "foo")
+(check-pred v? 1)
+(check-pred v? `(ffi ,(lambda (eval env χ) 42)))
+(check-pred v? `(ffi ,#%get))
+(check-pred v? `(ffi ,#%push))
+(check-pred v? `(ffi ,#%drop))
+(check-pred e-not-v? '(@ (\\ env χ 1) #hash() 2))
+(check-pred (not? v?) '(@ (\\ env χ 1) #hash() 2))
+(check-pred (not? e-not-v?) '(\\ env χ 1))
+(check-pred (not? e-not-v?) '(\\ env χ (\\ env χ 1)))
+(check-pred (not? e-not-v?) #hash())
+(check-pred (not? e-not-v?) "foo")
+(check-pred (not? e-not-v?) 1)
+(check-pred (not? e-not-v?) `(ffi ,(lambda (env χ) 42)))
+(check-pred e-or-v? '(\\ env χ 1))
+(check-pred e-or-v? '(\\ env χ (\\ env χ 1)))
+(check-pred e-or-v? #hash())
+(check-pred e-or-v? "foo")
+(check-pred e-or-v? 1)
+(check-pred e-or-v? `(ffi ,(lambda (eval env χ) 42)))
+(check-pred e-or-v? '(@ (\\ env χ 1) #hash() 2))
+
+(check-equal? (ev '(\\ env χ 1)) '(\\ env χ 1))
+(check-equal? (ev #hash()) #hash())
+(check-equal? (ev "foo") "foo")
+(check-equal? (ev 1) 1)
+(let ([example-ffi `(ffi ,(lambda (eval env χ) 42))])
+  (check-equal? (ev example-ffi) example-ffi))
+(check-equal? (ev `(ffi ,#%get)) `(ffi ,#%get))
+(check-equal? (ev `(ffi ,#%push)) `(ffi ,#%push))
+(check-equal? (ev `(ffi ,#%drop)) `(ffi ,#%drop))
+(check-equal? (ev '#%get) `(ffi ,#%get))
+(check-equal? (ev '#%push) `(ffi ,#%push))
+(check-equal? (ev '#%drop) `(ffi ,#%drop))
+;; TODO: test #%get, #%push, pop, FFI
+(check-equal? (ev '(@ (\\ env χ 1) #hash() (\\ env χ 2))) 1)
+(check-equal? (ev '(@ (\\ env χ 1) env (\\ env χ 2))) 1)
+(check-equal? (ev 'env) initial-env)
+(check-equal? (ev 'χ) '(\\ env χ "argv"))
+(check-equal? (ev '(@ #%force env χ)) '"argv")
+(check-equal? (ev '(@ (\\ env χ 1) env (\\ env χ 2))) 1)
+(check-equal? (ev '(@ (\\ env χ #%get) env (\\ env χ χ))) `(ffi ,#%get))
+(check-equal? (ev '(@ (\\ env χ #%push) env (\\ env χ χ))) `(ffi ,#%push))
+(check-equal? (ev '(@ (\\ env χ #%drop) env (\\ env χ χ))) `(ffi ,#%drop))
+(check-equal? (ev '(@ #%force env (\\ env χ χ))) unit)
+(check-equal? (ev '(@ #%force env (\\ env χ 42))) 42)
+(check-equal? (ev '(@ #%force env (\\ env χ (\\ env χ χ)))) '(\\ env χ χ))
+(check-equal? (ev '(thunk χ)) '(\\ env χ (@ (\\ env χ χ) env (\\ env χ "argv"))))
+(check-equal? (ev '(@ #%force env (thunk (@ #%force env χ)))) "argv")
+(check-equal? (ev '(@ #%force env (thunk 3))) 3)
+(check-equal? (ev '(#%force 3)) 3)
+
+
+
+
+#;(
+;; Primitive application
+;; defaults to:
+ =>            env=[E],    χ=X               (@     e-f env (\ env χ e-arg))                      …
+
+;; In particular, the sugared λ is just a function
+;; defaults to:
+ =>            env=[E],    χ=X               (@ capture
+                                                env
+                                                (\ env χ (@ (\ env χ e)
+                                                            (@ (@ #%push env "var-name") env χ)
+                                                           χ)))
+
+ CAPTURE       env=[E],    χ=X               (@ capture v-env (\ env χ e))                        …
+ =>            env=[E],    χ=X               (\ env χ (@ (λ env χ e) v-env χ))                    …
+
+ FORCE         env=[E],    χ=(\ env χ e-arg) (@ #%force v-env (\ env χ e))                          …
+ =>            env=[E],    χ=()              (@ (\ env χ e) v-env dummy)                          …
+)
+
+
+
+
+
+
+
+
+
+
+
 
 #|
 ;; Syntax of the language:
@@ -267,6 +440,8 @@ location of expr    current-continuation
  CONTINUE-ARG  [E]                v-arg         … E′,(v-f _)       Optimization: [],(v-f _)
  =>            [E′]          (v-f v-arg)        …
 
+ DEREFERENCE   [E,x=v,E′]    x                  …
+ =>            [E,x=v,E′]    v                  …
  
  ;; Reduction example:
     env             redex                                 continuation frames                                           rule to use
@@ -298,7 +473,7 @@ location of expr    current-continuation
 
 #;(
  ;; Using first-class environments and lazy evaluations:
- ;; λ, env, χ, get, push, drop are keywords
+ ;; λ, env, χ, get, push, #%drop are keywords
  ;; v-env
  v ::= (\ env χ e) ;; open term, expects an env to close the term
     || […]         ;; mapping from names to values
@@ -308,7 +483,7 @@ location of expr    current-continuation
     || push
     || pop
  e ::= v
-    || (@ e e e)
+    || (@ e-f e-env e-arg)
 
 
 TODO: instead of ad-hoc var-to-string conversion, use a functional env
@@ -318,78 +493,67 @@ TODO: instead of ad-hoc var-to-string conversion, use a functional env
  =>            environment′                  redex′                                               continuation frames′
 
 ;; Primitive application
- APP           env=E,    χ=X                 (@ (\ env χ e) v-env (\ env () e-arg))               …
- =>            env=v-env,χ=(\ env () e-arg)              e                                        …
+ APP           env=[E],    χ=X               (@ (\ env χ e) v-env (\ env χ e-arg))                …
+ =>            env=v-env,χ=(\ env χ e-arg)               e                                        …
 ;;---------------------------------------------------------------------------------------------------------------------------
 ;; Evaluation of sub-parts of an application
- APP-F         env=E,    χ=X                 (@  e-f e-env e-arg)                                 …
- =>            env=E,    χ=X                     e-f                                              … [env=E,χ=X],(@ _   e-env e-arg)
+ APP-F         env=[E],    χ=X               (@  e-f e-env e-arg)                                 …
+ =>            env=[E],    χ=X                   e-f                                              … env=[E],χ=X,(@ _   e-env e-arg)
 
- APP-ENV       env=E,    χ=X                 (@ e-f e-env e-arg)                                  …
- =>            env=E,    χ=X                        e-env                                         … [env=E,χ=X],(@ v-f _     e-arg)
+ APP-ENV       env=[E],    χ=X               (@ v-f e-env e-arg)                                  …
+ =>            env=[E],    χ=X                      e-env                                         … env=[E],χ=X,(@ v-f _     e-arg)
 
- APP-ARG       env=E,    χ=X                 (@ e-f e-env e-arg)                                  …
- =>            env=E,    χ=X                              e-arg                                   … [env=E,χ=X],(@ v-f v-env _    )
+ APP-ARG       env=[E],    χ=X               (@ v-f v-env e-arg)                                  …
+ =>            env=[E],    χ=X                            e-arg                                   … env=[E],χ=X,(@ v-f v-env _    )
+
+ CONTINUE-F    env=[E],    χ=X                v-f                                                 … E′,χ=X′,(_   e-env e-arg)
+ =>            env=[E′],   χ=X′              (@ v-f e-env e-arg)                                  …
+
+ CONTINUE-ENV  env=[E],    χ=X                    v-env                                           … E′,χ=X′,(v-f _     e-arg)
+ =>            env=[E′],   χ=X′              (@ v-f v-env e-arg)                                  …
+
+ CONTINUE-ARG  env=[E],    χ=X                          v-arg                                     … E′,χ=X′,(v-f v-env _    )
+ =>            env=[E′],   χ=X′              (@ v-f v-env v-arg)                                  … 
+
 ;;---------------------------------------------------------------------------------------------------------------------------
-;; Syntactic sugar (insertion of #%app)
- SUGAR-APP     env=E,    χ=X                 (#%app                    e-f             e-arg )    …
- =>            env=E′,   χ=X                 (@ (@ (get env "#%app")
+;; Syntactic sugar
+
+;; insertion of #%app at the front of all parentheses that don't start with an @ or \ or #%app
+ SUGAR-APP     env=[E],    χ=X               (                         e-f             e-arg )    …
+ =>            env=[E],    χ=X               (#%app                    e-f             e-arg )    …
+ =>            env=[E],    χ=X                 (@ (@ (@ get env (\ env χ "#%app"))
                                                    env
-                                                   (\ env () e-f))
+                                                   (\ env χ e-f))
                                                 env
-                                                (\ env () e-arg))  …
+                                                (\ env χ e-arg))                                  …
 ;; defaults to:
- =>            env=E′,   χ=X                 (@     e-f env (\ env () e-arg))                     …
+ =>            env=[E],    χ=X               (@     e-f env (\ env χ e-arg))                      …
 
- SUGAR-LAM     env=E,    χ=X                 (λ var-name e)                                       …
- =>            env=E′,   χ=X                 (#%app (#%app λ var-name) e)                         …
+;; In particular, the sugared λ is just a function
+ SUGAR-LAM     env=[E],    χ=X               (λ var-name e)                                       …
+ =>            env=[E],    χ=X               (#%app (#%app λ var-name) e)                         …
 ;; defaults to:
- =>            env=E′,   χ=X                 (@ capture
+ =>            env=[E],    χ=X               (@ capture
                                                 env
-                                                (λ env χ (@ (λ env χ e)
-                                                            (add env "var-name" χ)
+                                                (\ env χ (@ (\ env χ e)
+                                                            (@ (@ push env "var-name") env χ)
                                                             χ)))
+
+ SUGAR-STR     env=[E],    χ=X                        "str"                                       …
+ =>            env=[E],    χ=X               (#%datum "str")                                      …
+
+ SUGAR-NUM     env=[E],    χ=X                        0                                           …
+ =>            env=[E],    χ=X               (#%datum 0)                                          …
+
+ SUGAR-VAR     env=[E],    χ=X                        var-name                                    …
+ =>            env=[E],    χ=X               (get env var-name)                                   …
 ;;---------------------------------------------------------------------------------------------------------------------------
- CAPTURE       env=E,    χ=X                 (@ capture v-env (λ env χ e))                        …
- =>            env=E,    χ=X                 (λ env χ (@ (λ env χ e) v-env χ))                    …
+ CAPTURE       env=[E],    χ=X               (@ capture v-env (\ env χ e))                        …
+ =>            env=[E],    χ=X               (\ env χ (@ (λ env χ e) v-env χ))                    …
 
- FORCE         env=E,    χ=(λ env () e-arg)  (@ force v-env (λ env χ e))                                …
- =>            env=E,    χ=()                TODO                                           … [env=E,χ=(λ env () e-arg)],???
-
- CONTINUE-F    [E]                     v-f             … E′,(_ e-arg)
- =>            [E′]                   (v-f e-arg)      …
-
- CONTINUE-ARG  [E]                         v-arg       … E′,(v-f _)       Optimization: [],(v-f _)
- =>            [E′]                   (v-f v-arg)      …
-
+ FORCE         env=[E],    χ=(\ env χ e-arg) (@ #%force v-env (\ env χ e))                          …
+ =>            env=[E],    χ=()              (@ (\ env χ e) v-env dummy)                          …
 )
-
-
-;; "x" ::= "x","y","z"…   String
-;;
-;; v ::= (pλ -env e)              promise:      (unit) -> env -> α
-;;    |  (kλ -arg e)              continuation: α -> void
-;;    |  (cλ -arg e)              closure:      (α -> β)
-;;
-;; e ::= (-λ -env -arg -k e)      Abstraction (lambda) which takes
-;;                                  * an environment            always named -env (not in the -env)
-;;                                  * a promise for an argument always named -arg (not in the -env)
-;;                                  * a continuation            always named -k   (not in the -env)
-;;    |  (v e-env e-arg e-k)      Tail call
-;;    |  (v e-env ()    e-k)      Forcing a promise
-;;    |  (v ()    e-ret  ())      Calling a continuation
-;;    |  -env                     the -env
-;;    |  -arg                     the -arg of the innermost lambda
-;;    |  -k                       the continuation of the innermost lambda
-;;    |  (-get e-env e-str)       Get variable from environment
-;;    |  (-add e-env e-str e-val) Extend environment with new binding
-
-
-
-
-
-
-
 
 
 
