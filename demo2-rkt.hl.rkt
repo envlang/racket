@@ -22,20 +22,20 @@ Changing the order of execution:
 ꩜chunk[<use-case-order>
        (if condition if-true if-false)
        ;; can be expressed as:
-       #;(force (if condition
-                    (λ () if-true)
-                    (λ () if-false)))
+       ;;(force (if condition
+       ;;           (λ () if-true)
+       ;;           (λ () if-false)))
 
        (match v ([null if-null] [(cons a b) if-cons]))
        ;; can be expressed as:
-       #;(force (if (null? v)
-                    (λ () if-null)
-                    (λ () (let ([a (car v)] [b (cdr v)]) if-cons))))
+       ;;(force (if (null? v)
+       ;;           (λ () if-null)
+       ;;           (λ () (let ([a (car v)] [b (cdr v)]) if-cons))))
        
        (for/list ([x (in-list l)]) body)
        ;; can be expressed as
-       #;(map (λ (x) body) l)]
-
+       ;;(map (λ (x) body) l)
+       ]
 ꩜subsection{Syntactic sugar}
 
 ꩜chunk[<use-case-syntactic-sugar>
@@ -241,4 +241,5 @@ These environment manipulations can be modeled with row types:
          <program>)]
 
 ꩜chunk[<*>
-       #;<env+program>]
+       ;;<env+program>
+       ]
