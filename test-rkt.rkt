@@ -127,7 +127,8 @@
    (list))
 
 (@ (\\ #hash() env args
-       (list (((λλ x (λλ x 1)) 1) 2)
+       ((λλ x 1) 1)
+       #;(list (((λλ x (λλ x 1)) 1) 2)
              (((λλ x (λλ x x)) 1) 2)
              (((λλ x (λλ y y)) 1) 2)
              (((λλ x (λλ y x)) 1) 2)))
@@ -137,7 +138,7 @@
                                     "saved-env" env)
                               env
                               args
-                              (@ (hash-ref closure "body")
+                              (hash-ref closure "body") #;(@ (hash-ref closure "body")
                                  (hash-set (hash-ref closure "saved-env")
                                            (hash-ref closure "arg-name")
                                            (map (make-racket-proc (\\ #hash() env args
