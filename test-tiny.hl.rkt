@@ -69,7 +69,7 @@ a.k.a first-of-two
        <false-result>]
 
 ꩜; TODO: take my own red pill / blue pill picture
-꩜image{/tmp/Two-Buttons.jpg}
+꩜; ꩜image{/tmp/Two-Buttons.jpg}
 
 ꩜section{Pairs}
 
